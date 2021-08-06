@@ -1,0 +1,136 @@
+#! /usr/bin/env sh
+# SPDX-License-Identifier: 0BSD
+# -----------------------------------------------------------------------------
+
+##
+# module exists
+#
+# Usage: exists [-dgmo] <file>
+#
+# Ensure that <file> exists with the correct type, permissions, and ownership.
+#
+# Options:
+#  -d            Interpret <file> as a directory.
+#  -g <group>    Ensure group ownership is <group>. Current user's main group
+#                by default.
+#  -m <mode>     Ensure file permissions are <mode>. Must be octal. 0644 by
+#                default.
+#  -o <owner>    Ensure user ownership is <owner>. Current user by default.
+##
+
+fatal()
+{
+	_fatal_fmt="${1}"
+	shift
+
+	# shellcheck disable=SC2059
+	printf "exists: fatal: ${_fatal_fmt}\\n" "${@}" >&2
+	exit 1
+}
+
+directory="n"
+mode=""
+owner="$(id -un)"
+group="$(id -gn)"
+
+while getopts ":dg:m:o:" opt; do
+	case "${opt}" in
+	d)
+		directory="y"
+		;;
+	g)
+		group="${OPTARG}"
+		;;
+	m)
+		if ! printf "%s\\n" "${OPTARG}" | grep -Eq '^[0-7]{1,4}$'; then
+			fatal "invalid mode: %s" "${OPTARG}"
+		fi
+
+		mode="${OPTARG}"
+		;;
+	o)
+		owner="${OPTARG}"
+		;;
+	:)
+		fatal "option requires argument: -%s" "${OPTARG}"
+		;;
+	*)
+		fatal "invalid option: -%s" "${OPTARG}"
+		;;
+	esac
+done
+shift "$((OPTIND - 1))"
+
+if [ -z "${mode}" ]; then
+	if [ "${directory}" = "y" ]; then
+		mode="0755"
+	else
+		mode="0644"
+	fi
+fi
+
+created="n"
+
+umask 022
+if [ "${directory}" = "y" ]; then
+	if [ ! -d "${1}" ]; then
+		if [ -e "${1}" ]; then
+			fatal "not a directory: %s" "${1}"
+		fi
+
+		if ! mkdir -p "${1}"; then
+			fatal "failed to create directory: %s" "${1}"
+		fi
+
+		created="y"
+	fi
+else
+	if [ ! -f "${1}" ]; then
+		if [ -e "${1}" ]; then
+			fatal "not a regular file: %s" "${1}"
+		fi
+
+		if ! touch "${1}"; then
+			fatal "failed to create file: %s" "${1}"
+		fi
+
+		created="y"
+	fi
+fi
+
+# POSIX does not specify stat(1). GNU, Busybox, and Toybox use "stat -c %a"
+# while FreeBSD, OpenBSD, and NetBSD use "stat -f %Lp". All use "%u" and "%g"
+# for owner/group ID.
+if stat -c "%#a" "/dev/null" 2>/dev/null | grep -E -q '^[0-7]{1,4}$'; then
+	dst_mode="$(stat -c "%#a" "${1}")"
+	dst_og="$(stat -c "%u:%g" "${1}")"
+elif stat -f "%#Lp" "/dev/null" 2>/dev/null | grep -E -q '^[0-7]{1,4}$'; then
+	dst_mode="$(stat -f "%#Lp" "${1}")"
+	dst_og="$(stat -f "%u:%g" "${1}")"
+else
+	if [ "${created}" = "y" ]; then
+		rm -rf "${1}"
+	fi
+
+	fatal "unable to retrieve permissions and ownership: %s" "${1}"
+fi
+
+if [ "${dst_mode}" -ne "${mode}" ]; then
+	if ! chmod "${mode}" "${1}"; then
+		if [ "${created}" = "y" ]; then
+			rm -rf "${1}"
+		fi
+
+		fatal "failed to set permissions: %s" "${mode}"
+	fi
+fi
+
+if [ "${dst_og}" != "${owner}:${group}" ]; then
+	if ! chown "${owner}:${group}" "${1}"; then
+		if [ "${created}" = "y" ]; then
+			rm -rf "${1}"
+		fi
+
+		fatal "failed to set ownership: %s:%s" "${owner}" "${group}"
+	fi
+fi

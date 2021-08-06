@@ -1,0 +1,2 @@
+act diff=bash
+modules/* diff=bash

@@ -1,0 +1,21 @@
+#! /usr/bin/env sh
+# SPDX-License-Identifier: 0BSD
+# -----------------------------------------------------------------------------
+
+##
+# module nop
+#
+# Do nothing. If ACT_VERBOSE is set to 'y', then print each argument to
+# stderr(3).
+##
+
+# This is useful for testing that module arguments are passed properly.
+if [ "${ACT_VERBOSE}" = "y" ]; then
+	i=0
+	for arg in "${0}" "${@}"; do
+		printf "nop: argv[%d] = '%s'\\n" "${i}" "${arg}" >&2
+		i="$((i + 1))"
+	done
+fi
+
+exit 0

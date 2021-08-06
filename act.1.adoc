@@ -1,0 +1,184 @@
+= act(1)
+:manmanual: General Commands Manual
+:mansource: Act {VERSION}
+
+== Name
+
+act - automated configuration tool
+
+== Synopsis
+
+[verse]
+*act* [*-chv*] [*-C* _directory_] [*-H* _file_] [*-M* _directory_]
+    [*-l* _file_] [*-p* _method_] [*-u* _user_] \[[__user__**@**]_host_]...
+
+== Description
+
+*act* is a tool for automated configuration of remote hosts that attempts to
+only depend on **nc**(1), **rsync**(1), **sh**(1), **ssh**(1), and utilities
+specified by POSIX.1-2017.
+
+Execution of *act* involves two main phases:
+
+1. Copying a set of files to a temporary directory on the remote, specified in
+   the file __hostname__**.files.conf**.
+2. Copying a set of executable scripts, referred to as "modules", to the
+   remote and executing them within the temporary directory. These modules and
+   their arguments are specified in the file __hostname__**.modules.conf**.
+
+Hosts may be specified on the command line. Otherwise, they are read from the
+*hosts* file, one per line.
+
+=== File List
+
+The file list is passed directly to the *--files-from* argument to *rsync*.
+Relative paths in this file are interpreted as relative to the working
+directory of *act*.
+
+See the *--files-from* section of the **rsync**(1) manual for further
+information.
+
+=== Module List
+
+The module list has a simple (and terrible) format:
+
+* Empty lines and comments are ignored.
+* All other lines are module invocations, optionally prefixed with *priv:* to
+  specify that they should be executed with escalated privileges.
+* Comments begin with a *#* character and are effective until the end of the
+  line.
+* Newlines can be escaped by a *\* character to break a long line into
+  several shorter lines.
+
+Module invocations are similar to shell command invocations. For example, a
+module list containing the line
+
+[source]
+nop one "two three"
+
+will execute the module *nop* with two arguments: *one* and *two three*.
+
+=== Modules
+
+A "module" is a standalone script to be executed on the remote host. There are
+several "builtin" modules provided with *act* which may serve as examples. All
+modules are copied to the *modules* subdirectory of the remote temporary
+directory using *rsync* after the file list has been copied. Modules are
+executed in the remote temporary directory with arguments as specified in
+__hostname__**.modules.conf**.
+
+== Options
+
+*-C* _directory_::
+	Look for file and module lists in _directory_ instead of the default
+	*config*.
+
+*-H* _file_::
+	Use _file_ as the hosts file instead of the default *hosts*.
+
+*-M* _directory_::
+	Look for modules in _directory_ instead of the default *modules*.
+
+*-c*::
+	Disable coloured output.
+
+*-h*::
+	Display help text similar to this section of the manual.
+
+*-l* _file_::
+	Write a log of the execution to _file_. Be default, all log output is
+	written to */dev/null*.
+
+*-p* _method_::
+	Use _method_ for privilege escalation on the remote host. Currently, the
+	only accepted values are *doas* and *sudo*.
+
+*-u* _user_::
+	Log in as _user_ on the remote host. This name gets passed to **ssh**(1)
+	via its *-l* option. _user_ may be overridden by specifying a remote host
+	of the form __user__**@**__host__ on the *act* command line.
+
+*-v*::
+	Enable verbose output. This also causes the *-v* flag to be passed to
+	*rsync* and *ACT_VERBOSE* to be set to "y" in the environment of each
+	module. Specifying this option a second time will also enable debugging
+	output.
+
+== Environment
+
+*ACT_CONFIG*::
+	Directory containing file and module lists. Equivalent to using the *-C*
+	option.
+
+*ACT_HOSTS*::
+	Host list file. Equivalent to using the *-H* option.
+
+*ACT_MODULES*::
+	Directory containing modules. Equivalent to using the *-M* option.
+
+*ACT_PRIVESC*::
+	Privilege escalation method. Acceptable values are *doas* and *sudo*.
+	Equivalent to using the *-p* option.
+
+*ACT_RSYNC_EXTRA_FLAGS*::
+	Extra command line options to be passed to each execution of **rsync**(1).
+
+*ACT_SSH_EXTRA_FLAGS*::
+	Extra command line options to be passed to each execution of **ssh**(1).
+
+*ACT_SSH_USER*::
+	Set the user login to use when connecting to the remote host. Equivalent to
+	using the *-u* option.
+
+*ACT_VERBOSE*::
+	Boolean value for enabling verbose output. Equivalent to using the *-v*
+	option.
+
+== Files
+
+*hosts*::
+	Default host list.
+
+__hostname__**.files.conf**::
+	List of files to be copied to _hostname_. See the *--files-from* section of
+	the **rsync**(1) manual.
+
+__hostname__**.modules.conf**::
+	List of modules to be copied to and executed, in the order they are
+	specified, on _hostname_.
+
+== Notes
+
+=== Modules
+
+Modules _should_ aim to be idempotent; executing a module more than once with
+the same arguments should have the same effect as executing it once.
+
+=== POSIX
+
+For documentation for the POSIX.1-2017 utilities, see
+https://pubs.opengroup.org/onlinepubs/9699919799.
+
+=== Rsync
+
+*act* depends on https://rsync.samba.org[samba.org] *rsync*, not *openrsync*.
+This is mainly because *openrsync* does not (currently) support the
+*--files-from* behaviour. It also dies even when it is only on the receiving
+end as it doesn't support *--relative*, which is enabled by *--files-from*.
+
+A simple workaround for this is to use *rsync* instead of *openrsync*. However,
+as *openrsync* is part of the OpenBSD base system, *rsync* needs to be
+explicitly installed on OpenBSD hosts. A better workaround, only requiring
+installation of *rsync* on the local system, is to specify only non-clashing
+directories in the file list, as they will be copied recursively without issue,
+and add the *--no-relative* flag to *ACT_RSYNC_EXTRA_FLAGS*.
+
+If you are running into this issue, it is _strongly_ recommended that you read
+the **rsync**(1) manual - specifically the section on *--relative*.
+
+== See Also
+
+**rsync**(1),
+**sh**(1),
+**ssh**(1),
+**ssh_config**(5)

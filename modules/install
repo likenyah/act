@@ -1,0 +1,96 @@
+#! /usr/bin/env sh
+# This script is based on Rich Felker's install.sh from musl libc and is
+# considered public domain.
+# -----------------------------------------------------------------------------
+
+##
+# module install
+#
+# Usage: install [-Dgmo] <src> <dst>
+#
+# Install <src> to <dst> with permissions and ownership.
+#
+# Options:
+#  -d            Interpret <file> as a directory.
+#  -g <group>    Set group ownership to <group>. Current user's primary group
+#                by default.
+#  -m <mode>     Set file permissions to <mode>. Must be octal. 0755 by
+#                default.
+#  -o <owner>    Set user ownership to <owner>. Current user by default.
+##
+
+set -e
+
+fatal()
+{
+	_fatal_fmt="${1}"
+	shift
+
+	# shellcheck disable=SC2059
+	printf "install: fatal: ${_fatal_fmt}\\n" "${@}" >&2
+	exit 1
+}
+
+mkdirp="n"
+mode="0755"
+owner="$(id -un)"
+group="$(id -gn)"
+
+while getopts ":Dg:m:o:" opt; do
+	case "${opt}" in
+	D)
+		mkdirp="y"
+		;;
+	g)
+		group="${OPTARG}"
+		;;
+	m)
+		if ! printf "%s\\n" "${OPTARG}" | grep -Eq '^[0-7]{1,4}$'; then
+			fatal "invalid mode: %s" "${OPTARG}"
+		fi
+
+		mode="${OPTARG}"
+		;;
+	o)
+		owner="${OPTARG}"
+		;;
+	:)
+		fatal "option requires argument: -%s" "${OPTARG}"
+		;;
+	*)
+		fatal "unknown option: -%s" "${OPTARG}"
+		;;
+	esac
+done
+shift $((OPTIND - 1))
+
+if [ "${#}" -ne 2 ]; then
+	fatal "two arguments required: <src> <dst>"
+fi
+
+src="${1}"
+dst="${2}"
+tmp="${dst}.tmp.${$}"
+
+if [ -z "${dst##*/}" ]; then
+	fatal "<dst> ends with '/': %s" "${dst}"
+fi
+
+if [ "${mkdirp}" = "y" ] && [ -n "${dst%/*}" ]; then
+	umask 022
+	mkdir -p "${dst%/*}"
+fi
+
+set -C
+umask 077
+trap 'rm -rf ${tmp}' EXIT
+
+cp "${src}" "${tmp}"
+chmod "${mode}" "${tmp}"
+chown "${owner}:${group}" "${tmp}"
+
+if [ -d "${dst}" ]; then
+	fatal "<dst> is a directory: %s" "${dst}"
+fi
+
+mv -f "${tmp}" "${dst}"

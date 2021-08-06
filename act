@@ -1,0 +1,557 @@
+#! /usr/bin/env sh
+# SPDX-License-Identifier: 0BSD
+# -----------------------------------------------------------------------------
+
+act_help="\
+usage: ${0##*/} [-CHMhlpv] [<host>]...
+
+Options:
+ -C <config-dir>     Search for file and module lists in <config-dir>. (config)
+ -H <hosts>          Use host list <hosts>. (hosts)
+ -M <modules-dir>    Search for modules in <modules-dir>. (modules)
+ -h                  Display this help text.
+ -c                  Turn off coloured output.
+ -l <log-file>       Write log to <log-file>. If <log-file> is '-', log to
+                     stderr(3). (none)
+ -p <method>         Use <method> for privilege escalation. Currently only
+                     'doas' and 'sudo' are accepted. (doas)
+ -u <username>       Use username as the login for the remote host. This name
+                     gets passed to ssh(1) via its -l option.
+ -v                  Enable verbose output. May be specified twice to also
+                     enable debugging output.
+"
+
+ACT_TMPDIR="$(mktemp -d -p "${TMPDIR:-"/tmp"}")"
+trap 'rm -rf "${ACT_TMPDIR}"' EXIT HUP INT QUIT TERM
+
+# Make sure we always have the log file descriptor open somewhere.
+exec 9>/dev/null
+
+: "${ACT_CONFIG:="config"}"
+: "${ACT_HOSTS:="hosts"}"
+: "${ACT_MODULES:="modules"}"
+: "${ACT_PRIVESC:="doas"}"
+: "${ACT_RSYNC_EXTRA_FLAGS:=""}"
+: "${ACT_SSH_EXTRA_FLAGS:=""}"
+: "${ACT_SSH_USER:="$(id -un)"}"
+: "${ACT_VERBOSE2:="n"}"
+: "${ACT_VERBOSE:="${ACT_VERBOSE2}"}"
+
+: "${UNAME_n:="$(uname -n)"}"
+
+ACT_SSH_ARGV="\
+-o ControlMaster=auto \
+-o ControlPath=${ACT_TMPDIR}/control-%r-%h-%p.socket \
+-o ControlPersist=30s \
+-o LogLevel=QUIET \
+${ACT_SSH_EXTRA_FLAGS}\
+"
+
+if [ -t 2 ]; then
+	_c_bold="$(tput bold)"
+	_c_noise="$(tput setaf 8)"
+	_c_notok="$(tput setaf 1)"
+	_c_reset="$(tput sgr0)"
+else
+	_c_bold=""
+	_c_noise=""
+	_c_notok=""
+	_c_reset=""
+fi
+
+##
+# _do_printf - Internal printf(1) wrapper.
+#
+# @1:   A printf(1)-like format string.
+# @...: Arguments corresponding to the given format string.
+#
+# @return: None. (See printf(1).)
+#
+# This function just appends a newline and writes to stderr(3) by default.
+_do_printf()
+{
+	_do_printf_fmt="${1}"
+	shift
+
+	# shellcheck disable=SC2059
+	printf "${_do_printf_fmt}\\n" "${@}" >&2
+}
+
+##
+# shquote - Quote a string for evaluation by the shell.
+#
+# @1: String to quote.
+#
+# @return: String suitable for evaluation by the shell written to stdout(3).
+shquote()
+{
+	printf "%s\\n" "${1}" | sed "s/'/'\\\\''/g; 1s/^/'/; \$s/\$/'/"
+}
+
+##
+# shquotem - Quote multiple strings for evaluation by the shell.
+#
+# @...: String(s) to quote.
+#
+# @return: Strings suitable for evaluation by the shell written to stdout(3).
+shquotem()
+{
+	for _shquote_a in "${@}"; do
+		shquote "${_shquote_a}"
+	done
+}
+
+##
+# preproc - Preprocess a file, removing empty lines and comments.
+#
+# @1: Source file.
+#
+# @returns: Path to processed file written to stdout(3).
+preproc()
+{
+	_preproc_tmpf="$(mktemp -p "${ACT_TMPDIR}")"
+	sed -E '
+		# Strip empty lines, comment lines, and end-of-line comments.
+		/^[[:space:]]*(#.*)?$/d
+		s/[[:space:]]*#.*$//
+
+		# Fold escaped newlines by appending to pattern space and
+		# stripping the backslash-newline and all space immediately
+		# after it.
+		: fold
+		/\\$/ {
+			N
+			s/\\\n[[:space:]]*//
+			t fold
+		}
+
+		# Strip start-of-line and end-of-line whitespace.
+		s/^[[:space:]]+|[[:space:]]+$//g
+	' <"${1}" >"${_preproc_tmpf}"
+
+	printf "%s\\n" "${_preproc_tmpf}"
+}
+
+##
+# checkyn - Attempt to determine the boolean value of a provided string.
+#
+# @1: String to check.
+#
+# @return: 0 (true) if matching a "true" value, 1 (false) if matching a "false"
+#          value, 2 (false) otherwise.
+checkyn()
+{
+	case "${1}" in
+	[Yy1]|[Yy][Ee][Ss]|[Tt][Rr][Uu][Ee])
+		return 0
+		;;
+	[Nn0]|[Nn][Oo]|[Ff][Aa][Ll][Ss][Ee])
+		return 1
+		;;
+	*)
+		return 2
+		;;
+	esac
+}
+
+##
+# log - Write a formatted message to the log file.
+#
+# @1:   Log level. See syslog(3) for the expected levels.
+# @2:   A printf(3)-like format string.
+# @...: Arguments corresponding to the given format string.
+#
+# @return: None.
+log()
+{
+	_log_level="${1}"
+	_log_fmt="${2}"
+	shift 2
+
+	# shellcheck disable=SC2059
+	_log_msg="$(printf "${_log_fmt}\\n" "${@}")"
+
+	printf "%s %s %s[%s]: %s: %s\\n" "$(date -u "+%Y-%m-%dT%H:%M:%SZ")" \
+		"${UNAME_n}" "${0##*/}" "${$}" "${_log_level}" "${_log_msg}" \
+		>&9
+}
+
+##
+# msg - Write a formatted message.
+#
+# @1:   A printf(1)-like format string.
+# @...: Arguments corresponding to the given format string.
+#
+# @return: None. (See printf(1).)
+msg()
+{
+	log "NOTICE" "${@}"
+
+	_msg_fmt="${1}"
+	shift
+
+	_do_printf "${_c_bold}${_msg_fmt}${_c_reset}" "${@}"
+}
+
+##
+# dmsg - Write a formatted debug message.
+#
+# @1:   A printf(1)-like format string.
+# @...: Arguments corresponding to the given format string.
+#
+# @return: None. (See printf(1).)
+dmsg()
+{
+	log "DEBUG" "${@}"
+
+	if checkyn "${ACT_VERBOSE2}"; then
+		_dmsg_fmt="${1}"
+		shift
+
+		_do_printf "${_c_noise}${_dmsg_fmt}${_c_reset}" "${@}"
+	fi
+}
+
+##
+# vmsg - Write a formatted verbose message.
+#
+# @1:   A printf(1)-like format string.
+# @...: Arguments corresponding to the given format string.
+#
+# @return: None. (See printf(1).)
+vmsg()
+{
+	log "INFO" "${@}"
+
+	if checkyn "${ACT_VERBOSE}"; then
+		_vmsg_fmt="${1}"
+		shift
+
+		_do_printf "${_c_noise}${_vmsg_fmt}${_c_reset}" "${@}"
+	fi
+}
+
+##
+# fatal - Write a formatted error message and exit.
+#
+# @1:   A printf(1)-like format string.
+# @...: Arguments corresponding to the given format string.
+#
+# @return: None. (See exit(1).)
+fatal()
+{
+	_fatal_fmt="${1}"
+	shift
+
+	log "CRIT" "${_fatal_fmt}" "${@}"
+	_do_printf "${_c_bold}${_c_notok}fatal: ${_fatal_fmt}${_c_reset}" "${@}"
+	exit 1
+}
+
+##
+# rsync_cmd - Execute an rsync(1) command.
+#
+# @...: Rsync arguments. For further information, see rsync(1).
+#
+# @return: See rsync(1).
+rsync_cmd()
+{
+	_rsync_cmd_ssh="ssh ${ACT_SSH_ARGV} -l ${ACT_SSH_USER}"
+
+	if checkyn "${ACT_VERBOSE}"; then
+		dmsg 'rsync -av -e "%s" %s' "${_rsync_cmd_ssh}" "${*}"
+		rsync -av ${ACT_RSYNC_EXTRA_FLAGS} -e "${_rsync_cmd_ssh}" "${@}"
+	else
+		dmsg 'rsync -a -e "%s" %s' "${_rsync_cmd_ssh}" "${*}"
+		rsync -a ${ACT_RSYNC_EXTRA_FLAGS} -e "${_rsync_cmd_ssh}" "${@}"
+	fi
+}
+
+##
+# ssh_cmd - Execute a command on a remote host via ssh(1).
+#
+# @1:   Remote host to connect to.
+# @...: Command to execute.
+#
+# @return: See ssh(1).
+ssh_cmd()
+{
+	_ssh_cmd_host="${1}"
+	_ssh_cmd_ssh="ssh ${ACT_SSH_ARGV} -l ${ACT_SSH_USER}"
+	shift
+
+	dmsg "%s -t %s -- %s" "${_ssh_cmd_ssh}" "${_ssh_cmd_host}" "${*}"
+	ssh ${ACT_SSH_ARGV} -l "${ACT_SSH_USER}" -t "${_ssh_cmd_host}" -- "${@}"
+}
+
+##
+# ctrl_cmd - Operate on the control socket for the connection to a remote host.
+#
+# @1:   Remote host to connect to.
+# @2:   Control socket command.
+# @...: Further options for ssh(1). (Optional.)
+#
+# @return: See ssh(1).
+ctrl_cmd()
+{
+	_ctrl_cmd_host="${1}"
+	_ctrl_cmd_ssh="ssh ${ACT_SSH_ARGV} -l ${ACT_SSH_USER}"
+	shift
+
+	dmsg "%s -O %s -N %s" "${_ctrl_cmd_ssh}" "${*}" "${_ctrl_cmd_host}"
+	ssh ${ACT_SSH_ARGV} -l "${ACT_SSH_USER}" -O "${@}" -N "${_ctrl_cmd_host}"
+}
+
+##
+# ctrl_open - Open a control socket for the connection to a remote host.
+#
+# @1: Remote host to connect to.
+#
+# @return: See ssh(1).
+ctrl_open()
+{
+	vmsg "%s: opening control socket" "${1}"
+	ssh_cmd "${1}" ":"
+}
+
+##
+# ctrl_close - Close the control socket for the connection to a remote host.
+#
+# @1: Remote host to connect to.
+#
+# @return: See ssh(1).
+ctrl_close()
+{
+	vmsg "closing control socket" "${1}"
+	ctrl_cmd "${1}" "exit"
+}
+
+##
+# rlog_init - Set up a forwarded Unix socket for remote logging.
+#
+# @1: Remote host to connect to.
+# @2: Path to local socket.
+# @3: Path to remote socket.
+#
+# @return: None.
+rlog_init()
+{
+	if command -v "nc" >/dev/null 2>&1; then
+		vmsg "opening log socket: %s" "${2}"
+		ctrl_cmd "${1}" "forward" -R "${3}:${2}"
+	fi
+}
+
+##
+# rlog_open - Listen on a remote logging socket.
+#
+# @1: Path to local socket.
+#
+# @return: None.
+rlog_open()
+{
+	if command -v "nc" >/dev/null 2>&1 \
+	&& ! pgrep -f -u "$(id -u)" "nc -NUlk -- ${1}"; then
+		vmsg "listening on log socket with nc(1): %s" "${1}"
+		nc -NUlk -- "${1}" >&9 &
+	fi
+}
+
+##
+# rlog_close - Quit listening on a remote logging socket.
+#
+# @1: Path to local socket.
+#
+# @return: None.
+#
+# NOTE: nc(1) may have exited by this point if the remote end hung up.
+rlog_close()
+{
+	if command -v "nc" >/dev/null 2>&1; then
+		vmsg "stopping listening on log socket: %s" "${1}"
+		pkill -f -u "$(id -u)" "nc -NUlk -- ${1}"
+	fi
+}
+
+##
+# module <host> <tmpdir> [priv:]<module> [<args>]
+module()
+{
+	_module_host="${1}"
+	_module_cwd="${2}"
+
+	if [ "${3#priv:}" != "${3}" ]; then
+		_module_m="${3#priv:}"
+		_module_p="${ACT_PRIVESC}"
+
+		vmsg "running privileged module: %s" "${_module_m}"
+	else
+		_module_m="${3}"
+		_module_p=""
+
+		vmsg "running module: %s" "${_module_m}"
+	fi
+
+	# The modules/ directory is mirrored on the remote, so just do a local
+	# check on whether the module we've been given is executable.
+	if [ ! -x "${ACT_MODULES}/${_module_m}" ]; then
+		fatal "module does not exist: %s" "${_module_m}"
+	fi
+
+	eval "set -- ${4}"
+	dmsg "%s: %s %s" "${_module_host}" "${_module_m}" "${*}"
+
+	# This needs to all be on one line to avoid having spurious tab
+	# characters in the log output.
+	# shellcheck disable=SC2046
+	ssh_cmd "${_module_host}" "cd '${_module_cwd}' && ACT_VERBOSE='${ACT_VERBOSE}' ${_module_p} './modules/${_module_m}'" $(shquotem "${@}")
+}
+
+while getopts ":C:H:M:chl:p:u:v" opt; do
+	case "${opt}" in
+	C)
+		ACT_CONFIG="${OPTARG}"
+		;;
+	H)
+		ACT_HOSTS="${OPTARG}"
+		;;
+	M)
+		ACT_MODULES="${OPTARG}"
+		;;
+	c)
+		_c_bold=""
+		_c_noise=""
+		_c_notok=""
+		_c_reset=""
+		;;
+	h)
+		printf "%s" "${act_help}" >&2
+		exit 0
+		;;
+	l)
+		if [ "${OPTARG}" = "-" ]; then
+			exec 9>&2
+		elif ! exec 9>>"${OPTARG}"; then
+			exec 9>/dev/null
+			fatal "failed to open log file: %s" "${OPTARG}"
+		fi
+		;;
+	p)
+		ACT_PRIVESC="${OPTARG}"
+		;;
+	u)
+		ACT_SSH_USER="${OPTARG}"
+		;;
+	v)
+		if checkyn "${ACT_VERBOSE}"; then
+			ACT_VERBOSE2="y"
+		else
+			ACT_VERBOSE="y"
+		fi
+		;;
+	:)
+		fatal "option requires argument: -%s" "${OPTARG}"
+		;;
+	*)
+		fatal "invalid option: -%s" "${OPTARG}"
+		;;
+	esac
+done
+shift "$((OPTIND - 1))"
+
+case "${ACT_PRIVESC}" in
+doas|sudo)
+	;;
+*)
+	fatal "unknown privilege escalation method: %s" "${ACT_PRIVESC}"
+	;;
+esac
+
+if [ "${#}" -eq 0 ]; then
+	if [ ! -f "${ACT_HOSTS}" ]; then
+		fatal "file does not exist: %s" "${ACT_HOSTS}"
+	fi
+
+	while IFS=" 	" read -r host; do
+		set -- "${@}" "${host}"
+	done <"$(preproc "${ACT_HOSTS}")"
+fi
+
+if [ "${#}" -eq 0 ]; then
+	fatal "no hosts provided"
+fi
+
+for host in "${@}"; do
+	save_user="${ACT_SSH_USER}"
+
+	if [ "${host##*@}" != "${host}" ]; then
+		ACT_SSH_USER="${host%@*}"
+		host="${host##*@}"
+	fi
+
+	if ! ping -c 1 "${host}" >/dev/null 2>&1; then
+		fatal "%s: unable to connect" "${host}"
+	elif ! ctrl_open "${host}"; then
+		fatal "%s: unable to open SSH control socket" "${host}"
+	fi
+
+	tmpdir="/tmp/act-${$}"
+	hostname="$(ssh_cmd "${1}" hostname | tr -d "\r")"
+	files="${ACT_CONFIG}/${hostname}.files.conf"
+	modules="${ACT_CONFIG}/${hostname}.modules.conf"
+	msg "%s: full hostname: %s" "${host}" "${hostname}"
+
+	msg "%s: setting up temporary directory" "${host}"
+	if ! ssh_cmd "${1}" mkdir -m 0700 -p "${tmpdir}"; then
+		fatal "%s: failed to create directory: %s" "${host}" "${tmpdir}"
+	fi
+
+	if [ -s "${files}" ]; then
+		msg "%s: copying files: %s" "${host}" "${files}"
+		if ! rsync_cmd -r --files-from="${files}" "${PWD}" "${1}:${tmpdir}" \
+		|| ! rsync_cmd "${files}" "${1}:${tmpdir}"; then
+			fatal "%s: failed to copy file list: %s" \
+				"${host}" "${files}"
+		fi
+	else
+		msg "%s: no file list; skipping" "${host}"
+	fi
+
+	if [ -s "${modules}" ]; then
+		msg "%s: copying modules: %s" "${host}" "${ACT_MODULES}"
+		if ! rsync_cmd "${ACT_MODULES}/" "${1}:${tmpdir}/modules/"; then
+			fatal "%s: failed to copy modules" "${host}"
+		fi
+
+		log_local="${ACT_TMPDIR}/log.socket"
+		log_remote="${tmpdir}/log.socket"
+		if ! rlog_init "${1}" "${log_local}" "${log_remote}"; then
+			fatal "%s: failed to set up log socket: %s" \
+				"${host}" "${log_local}"
+		fi
+
+		if ! rlog_open "${log_local}"; then
+			fatal "%s: failed to listen on log socket: %s" \
+				"${host}" "${log_local}"
+		fi
+
+		while IFS=" 	" read -r mod argv; do
+			if ! module "${1}" "${tmpdir}" "${mod}" "${argv}" <&3; then
+				fatal "%s: module failure: %s" \
+					"${host}" "${mod}"
+			fi
+		done 3<&0 <"$(preproc "${modules}")"
+
+		# Make sure nc(1) is no longer listening on the log socket.
+		rlog_close "${log_local}"
+	else
+		msg "%s: no module list; skipping" "${host}"
+	fi
+
+	msg "%s: cleaning up temporary directory" "${host}"
+	ssh_cmd "${1}" rm -rf "${tmpdir}"
+	ctrl_close "${host}"
+
+	ACT_SSH_USER="${save_user}"
+	shift
+done

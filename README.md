@@ -1,5 +1,7 @@
 # act
 
+[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/E1E65IUF4)
+
 ## Overview
 
 **act** [ **-hv** ] [ **-C** _directory_ ] [ **-H** _file_ ]

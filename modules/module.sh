@@ -214,7 +214,7 @@ vmsg()
 {
 	log "INFO" "${@}"
 	if checkyn "${ACT_VERBOSE}"; then
-		msg "${@}"
+		_do_printf "${@}"
 	fi
 }
 

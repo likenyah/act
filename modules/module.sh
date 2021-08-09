@@ -284,3 +284,15 @@ module()
 	OPTIND="${_module_OPTIND}"
 	return "${_module_ret}"
 }
+
+##
+# priv - Execute a command as a privileged user.
+#
+# @...: Command to execute.
+#
+# @returns: Exit status of provided command.
+priv()
+{
+	log "DEBUG" "priv: %s %s" "${ACT_PRIVESC}" "${*}"
+	${ACT_PRIVESC} "${@}"
+}

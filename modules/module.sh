@@ -126,6 +126,7 @@ _do_exit()
 {
 	if checkyn "${_act_logging}"; then
 		pkill -u "$(id -u)" "nc -NU -- log.socket"
+		rm -f "log.pipe"
 	fi
 }
 

@@ -16,8 +16,9 @@
 #       code in your own modules.
 ##
 
-: "${ACT_VERBOSE:="n"}"
 : "${ACT_MODULE_NAME:="${0##*/}"}"
+: "${ACT_PRIVESC:=""}"
+: "${ACT_VERBOSE:="n"}"
 : "${UNAME_n:="$(uname -n)"}"
 
 # If we have netcat (nc(1)), use it to do remote logging.

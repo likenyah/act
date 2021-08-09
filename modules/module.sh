@@ -16,8 +16,9 @@
 #       code in your own modules.
 ##
 
-: "${ACT_VERBOSE:="n"}"
 : "${ACT_MODULE_NAME:="${0##*/}"}"
+: "${ACT_PRIVESC:=""}"
+: "${ACT_VERBOSE:="n"}"
 : "${UNAME_n:="$(uname -n)"}"
 
 # If we have netcat (nc(1)), use it to do remote logging.
@@ -125,6 +126,7 @@ _do_exit()
 {
 	if checkyn "${_act_logging}"; then
 		pkill -u "$(id -u)" "nc -NU -- log.socket"
+		rm -f "log.pipe"
 	fi
 }
 
@@ -252,10 +254,11 @@ fatal()
 }
 
 ##
-# module [-v] <module-name> [<module-arg>]...
+# module [-p|-v] <module-name> [<module-arg>]...
 #
 # Execute <module-name>, if it exists, with the provided arguments. With -v,
-# print the path to <module-name> but do not execute it.
+# print the path to <module-name> but do not execute it. With -p, use
+# ACT_PRIVESC to execute the module as a privileged user.
 #
 # This function also saves/restores the values of OPTARG and OPTIND so may be
 # used during option handling.
@@ -267,10 +270,14 @@ module()
 	OPTIND=1
 
 	_module_print="n"
+	_module_priv="n"
 	_module_ret=2
 
-	while getopts ":v" opt; do
+	while getopts ":pv" opt; do
 		case "${opt}" in
+		p)
+			_module_priv="y"
+			;;
 		v)
 			_module_print="y"
 			;;
@@ -286,9 +293,21 @@ module()
 		if checkyn "${_module_print}"; then
 			printf "%s\\n" "./modules/${1}"
 			_module_ret=0
+		elif checkyn "${_module_priv}"; then
+			_module_cmd="./modules/${1}"
+			shift
+
+			log "DEBUG" "module: %s %s %s" \
+				"${ACT_PRIVESC}" "${_module_cmd}" "${@}"
+
+			${ACT_PRIVESC} "${_module_cmd}" "${@}"
+			_module_ret="${?}"
 		else
 			_module_cmd="./modules/${1}"
 			shift
+
+			log "DEBUG" "module: %s %s" \
+				"${_module_cmd}" "${@}"
 
 			"${_module_cmd}" "${@}"
 			_module_ret="${?}"
@@ -298,4 +317,16 @@ module()
 	OPTARG="${_module_OPTARG}"
 	OPTIND="${_module_OPTIND}"
 	return "${_module_ret}"
+}
+
+##
+# priv - Execute a command as a privileged user.
+#
+# @...: Command to execute.
+#
+# @returns: Exit status of provided command.
+priv()
+{
+	log "DEBUG" "priv: %s %s" "${ACT_PRIVESC}" "${*}"
+	${ACT_PRIVESC} "${@}"
 }

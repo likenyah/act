@@ -404,7 +404,7 @@ module()
 	# This needs to all be on one line to avoid having spurious tab
 	# characters in the log output.
 	# shellcheck disable=SC2046
-	ssh_cmd "${_module_host}" "cd '${_module_cwd}' && ACT_VERBOSE='${ACT_VERBOSE}' ${_module_p} './modules/${_module_m}'" $(shquotem "${@}")
+	ssh_cmd "${_module_host}" "cd '${_module_cwd}' && ACT_PRIVESC='${ACT_PRIVESC}' ACT_VERBOSE='${ACT_VERBOSE}' ${_module_p} './modules/${_module_m}'" $(shquotem "${@}")
 }
 
 while getopts ":C:H:M:chl:p:u:v" opt; do

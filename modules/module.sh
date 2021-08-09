@@ -219,6 +219,22 @@ vmsg()
 }
 
 ##
+# error - Print a formatted error message.
+#
+# @1:   A printf(3)-like format string.
+# @...: Arguments corresponding to the provided format string.
+#
+# @return: See printf(1).
+error()
+{
+	_error_fmt="${1}"
+	shift
+
+	log "ERR" "${_error_fmt}" "${@}"
+	_do_printf "error: ${_error_fmt}" "${@}"
+}
+
+##
 # fatal - Print a formatted error message and exit.
 #
 # @1:   A printf(3)-like format string.

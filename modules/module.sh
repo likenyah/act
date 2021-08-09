@@ -237,10 +237,11 @@ fatal()
 }
 
 ##
-# module [-v] <module-name> [<module-arg>]...
+# module [-p|-v] <module-name> [<module-arg>]...
 #
 # Execute <module-name>, if it exists, with the provided arguments. With -v,
-# print the path to <module-name> but do not execute it.
+# print the path to <module-name> but do not execute it. With -p, use
+# ACT_PRIVESC to execute the module as a privileged user.
 #
 # This function also saves/restores the values of OPTARG and OPTIND so may be
 # used during option handling.
@@ -252,10 +253,14 @@ module()
 	OPTIND=1
 
 	_module_print="n"
+	_module_priv="n"
 	_module_ret=2
 
-	while getopts ":v" opt; do
+	while getopts ":pv" opt; do
 		case "${opt}" in
+		p)
+			_module_priv="y"
+			;;
 		v)
 			_module_print="y"
 			;;
@@ -271,9 +276,21 @@ module()
 		if checkyn "${_module_print}"; then
 			printf "%s\\n" "./modules/${1}"
 			_module_ret=0
+		elif checkyn "${_module_priv}"; then
+			_module_cmd="./modules/${1}"
+			shift
+
+			log "DEBUG" "module: %s %s %s" \
+				"${ACT_PRIVESC}" "${_module_cmd}" "${@}"
+
+			${ACT_PRIVESC} "${_module_cmd}" "${@}"
+			_module_ret="${?}"
 		else
 			_module_cmd="./modules/${1}"
 			shift
+
+			log "DEBUG" "module: %s %s" \
+				"${_module_cmd}" "${@}"
 
 			"${_module_cmd}" "${@}"
 			_module_ret="${?}"
